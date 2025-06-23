@@ -1,3 +1,6 @@
+"""
+加载数据到dict，检查结果是否正确 等
+"""
 import glob
 import pandas as pd
 from typing import Union, List, Literal, Any, Dict
@@ -6,12 +9,12 @@ from abc import ABC
 
 class MMLUDataset(ABC):
     def __init__(self,
-        split: Union[Literal['dev'], Literal['val'], Literal['test']],
+        split: Union[Literal['train'], Literal['valid'], Literal['test']],
         ) -> None:
 
         self._split = split
 
-        data_path = f"datasets/MMLU/data/{self._split}/"
+        data_path = f"Datasets/MMLU/data/{self._split}/"
         self._total_df: pd.DataFrame = self._load_data(data_path)
 
     @staticmethod

@@ -36,7 +36,7 @@ class Graph(ABC):
                 llm_names: List[str],
                 agent_names: List[str],
                 decision_method: str,
-                reasoning_name: str,
+                reasoning_name: str,#协作方式
                 prompt_file: str,
                 optimized_spatial:bool = False,
                 initial_spatial_probability: float = 0.5,
@@ -85,6 +85,7 @@ class Graph(ABC):
         self.temporal_masks = torch.nn.Parameter(fixed_temporal_masks,requires_grad=False)  # fixed edge masks
         
     @property
+    # 返回空间邻接矩阵
     def spatial_adj_matrix(self):
         matrix = np.zeros((len(self.nodes), len(self.nodes)))
         for i, node1_id in enumerate(self.nodes):
@@ -94,6 +95,7 @@ class Graph(ABC):
         return matrix
 
     @property
+    # 返回时间邻接矩阵，也就是上一轮到当前轮的邻接矩阵
     def temporal_adj_matrix(self):
         matrix = np.zeros((len(self.nodes), len(self.nodes)))
         for i, node1_id in enumerate(self.nodes):
@@ -113,12 +115,14 @@ class Graph(ABC):
     def num_nodes(self):
         return len(self.nodes)
 
+    # 根据id找到节点
     def find_node(self, id: str):
         if id in self.nodes.keys():
             return self.nodes[id]
         raise Exception(f"Node not found: {id} among "
                         f"{[node.id for node in self.nodes.values()]}")
         
+    # 添加节点到self.nodes中
     def add_node(self, node: Node):
         node_id = node.id if node.id is not None else shortuuid.ShortUUID().random(length=4)
         while node_id in self.nodes:
@@ -127,6 +131,7 @@ class Graph(ABC):
         self.nodes[node_id] = node
         return node
     
+    # 初始化节点，需要设置domain，llm_name，reason_name，role
     def init_nodes(self):
         """
         Creates and adds new nodes to the graph.
@@ -140,6 +145,7 @@ class Graph(ABC):
                 agent_instance = AgentRegistry.get("Agent", **kwargs)
                 self.add_node(agent_instance)
     
+    # 初始化潜在的边，也就是所有节点之间的边，需要在空间矩阵和时间矩阵中都添加
     def init_potential_edges(self):
         """
         Creates and potential edges to the graph.
@@ -149,6 +155,7 @@ class Graph(ABC):
                 self.potential_spatial_edges.append([node1_id,node2_id])
                 self.potential_temporal_edges.append([node1_id,node2_id])
 
+    # 清除所有空间连接
     def clear_spatial_connection(self):
         """
         Clear all the spatial connection of the nodes in the graph.
@@ -159,6 +166,7 @@ class Graph(ABC):
         self.decision_node.spatial_predecessors = []
         self.decision_node.spatial_successors = []
     
+    # 清除所有时间连接
     def clear_temporal_connection(self):
         """
         Clear all the temporal connection of the nodes in the graph.
@@ -167,35 +175,52 @@ class Graph(ABC):
             self.nodes[node_id].temporal_predecessors = []
             self.nodes[node_id].temporal_successors = []
 
+    # 将决策节点连接到其他节点，也就是将决策节点添加到其他节点的successors中
     def connect_decision_node(self):
         for node_id in self.nodes.keys():
             self.nodes[node_id].add_successor(self.decision_node)
+    """
+    优化的意义："优化"指的是图结构是否可学习
+    不优化时，图结构是固定的，不考虑概率。优化时，图结构是可学习的，通过反向传播优化连接结构
+    optimized_spatial是bool类型
 
+    每个任务执行时：
+        空间连接会重新构建
+        时间连接会在每轮执行时重新构建
+    """
+
+    # 构建空间连接
     def construct_spatial_connection(self, temperature: float = 1.0, threshold: float = None,): # temperature must >= 1.0
         self.clear_spatial_connection()
+        # 初始化对数概率列表
         log_probs = [torch.tensor(0.0, requires_grad=self.optimized_spatial)]
-        
+        # 遍历所有潜在的连接、边的逻辑值和掩码
         for potential_connection, edge_logit, edge_mask in zip(self.potential_spatial_edges, self.spatial_logits, self.spatial_masks):
             out_node:Node = self.find_node(potential_connection[0])
             in_node:Node = self.find_node(potential_connection[1])
+            # 如果掩码为0，则跳过
             if edge_mask == 0.0:
                 continue
+            # 如果掩码为1，并且没有优化，则检查是否存在环
             elif edge_mask == 1.0 and self.optimized_spatial==False:
                 if not self.check_cycle(in_node, {out_node}):
+                    # 如果不形成循环，添加空间连接
                     out_node.add_successor(in_node,'spatial')
                 continue
-            if not self.check_cycle(in_node, {out_node}):
-                edge_prob = torch.sigmoid(edge_logit / temperature)
+            if not self.check_cycle(in_node, {out_node}):#如果不形成循环，则计算概率
+                edge_prob = torch.sigmoid(edge_logit / temperature)#sigmoid函数将概率映射到0-1之间
                 if threshold:
+                    # 将概率二值化（大于阈值设为1，否则为0）
                     edge_prob = torch.tensor(1 if edge_prob > threshold else 0)
-                if torch.rand(1) < edge_prob:
+                if torch.rand(1) < edge_prob:#如果随机数小于概率，则添加空间连接
                     out_node.add_successor(in_node,'spatial')
                     log_probs.append(torch.log(edge_prob))
-                else:
+                else:#记录1-概率
                     log_probs.append(torch.log(1 - edge_prob))
                     
-        return torch.sum(torch.stack(log_probs))
+        return torch.sum(torch.stack(log_probs))#返回所有连接的概率之和
     
+    # 构建时间连接
     def construct_temporal_connection(self, round:int = 0, temperature: float = 1.0, threshold: float = None,):  # temperature must >= 1.0
         self.clear_temporal_connection()
         log_probs = [torch.tensor(0.0, requires_grad=self.optimized_temporal)]
@@ -207,15 +232,16 @@ class Graph(ABC):
             if edge_mask == 0.0:
                 continue
             elif edge_mask == 1.0 and self.optimized_temporal==False:
+                # 如果掩码为1，并且没有优化，则检查是否存在环
                 if not self.check_cycle(in_node, {out_node}):
                     out_node.add_successor(in_node,'temporal')
                 continue
-            
+            # 基于概率 添加时间连接
             edge_prob = torch.sigmoid(edge_logit / temperature)
             if threshold:
                 edge_prob = torch.tensor(1 if edge_prob > threshold else 0)
             if torch.rand(1) < edge_prob:
-                out_node.add_successor(in_node,'temporal')
+                out_node.add_successor(in_node,'temporal')#把in_node添加到out_node的successors中
                 log_probs.append(torch.log(edge_prob))
             else:
                 log_probs.append(torch.log(1 - edge_prob))
@@ -223,18 +249,23 @@ class Graph(ABC):
         return torch.sum(torch.stack(log_probs))
 
 
+    # 运行图，输入是输入数据，num_rounds是轮数，max_tries是最大尝试次数，max_time是最大时间
+    # 返回最终答案和log_probs
+    # 按拓扑顺序执行节点
     def run(self, inputs: Dict[str,str], 
                   num_rounds:int = 2, 
                   max_tries: int = 3, 
                   max_time: int = 100,) -> List[Any]:
         log_probs = 0
         for round in range(num_rounds):
-            log_probs += self.construct_spatial_connection()
-            log_probs += self.construct_temporal_connection(round)
+            log_probs += self.construct_spatial_connection()#构建空间连接并累加概率
+            log_probs += self.construct_temporal_connection(round)#构建这一轮的时间连接并累加概率
             
+            # 计算每个节点的入度，找到入度为0的节点
             in_degree = {node_id: len(node.spatial_predecessors) for node_id, node in self.nodes.items()}
             zero_in_degree_queue = [node_id for node_id, deg in in_degree.items() if deg == 0]
             
+            # 按拓扑顺序执行节点
             while zero_in_degree_queue:
                 current_node_id = zero_in_degree_queue.pop(0)
                 tries = 0
@@ -251,8 +282,9 @@ class Graph(ABC):
                     in_degree[successor.id] -= 1
                     if in_degree[successor.id] == 0:
                         zero_in_degree_queue.append(successor.id)
-            self.update_memory()
-            
+            self.update_memory()#更新所有节点的记忆
+
+        # 在执行完所有轮次后，将决策节点连接到其他节点，并执行决策节点
         self.connect_decision_node()
         self.decision_node.execute(inputs)
         final_answers = self.decision_node.outputs
@@ -299,6 +331,7 @@ class Graph(ABC):
             final_answers.append("No answer of the decision node")
         return final_answers, log_probs
     
+    # 更新所有节点的记忆
     def update_memory(self):
         for id,node in self.nodes.items():
             node.update_memory()
@@ -311,19 +344,24 @@ class Graph(ABC):
                 return True
         return False
 
+    # 更新空间和时间掩码
+    # 实现边的剪枝
+    # 根据概率和剪枝率更新连接
     def update_masks(self, pruning_rate: float) -> torch.Tensor:
-        if self.optimized_spatial:
-            num_edges = (self.spatial_masks > 0).sum()
-            num_masks = (self.spatial_masks == 0).sum()
+        if self.optimized_spatial:#如果空间连接可学习
+            num_edges = (self.spatial_masks > 0).sum()#统计非零掩码的数量
+            num_masks = (self.spatial_masks == 0).sum()#统计零掩码的数量
+            #计算需要剪枝的数量，如果剪枝率大于0，则至少剪枝1条边
             prune_num_edges = torch.round(num_edges*pruning_rate) if torch.round(num_edges*pruning_rate)>0 else 1
-            _edge_logits = self.spatial_logits.clone()
-            min_edge_logit = _edge_logits.min()
-            _edge_logits[self.spatial_masks == 0] = min_edge_logit - 1.0
-            sorted_edges_idx = torch.argsort(_edge_logits)
-            prune_idx = sorted_edges_idx[:int(prune_num_edges + num_masks)]
-            self.spatial_masks[prune_idx] = 0
+            _edge_logits = self.spatial_logits.clone()#克隆原始的逻辑值
+            min_edge_logit = _edge_logits.min()#找到最小值
+            _edge_logits[self.spatial_masks == 0] = min_edge_logit - 1.0#将零掩码的逻辑值设置为最小值-1（确保它们会被优先剪掉）
+            sorted_edges_idx = torch.argsort(_edge_logits)#对逻辑值进行排序
+            prune_idx = sorted_edges_idx[:int(prune_num_edges + num_masks)]#选择需要剪掉的边的索引（包括新剪掉的边和已掩码的边）
+            self.spatial_masks[prune_idx] = 0#将这些边的掩码设置为0
         
         if self.optimized_temporal:
+            # 时间连接的剪枝过程与空间连接类似
             num_edges = (self.temporal_masks > 0).sum()
             num_masks = (self.temporal_masks == 0).sum()
             prune_num_edges = torch.round(num_edges*pruning_rate) if torch.round(num_edges*pruning_rate)>0 else 1

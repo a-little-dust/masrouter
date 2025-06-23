@@ -76,6 +76,8 @@ class Node(ABC):
             operation.temporal_successors.append(self)
 
     def add_successor(self, operation: 'Node', st='spatial'):
+        # spatial_successors是后置节点，predecessors是前置节点
+        # 这里既需要添加前置节点，也需要添加后置节点
         if st =='spatial' and operation not in self.spatial_successors:
             self.spatial_successors.append(operation)
             operation.spatial_predecessors.append(self)

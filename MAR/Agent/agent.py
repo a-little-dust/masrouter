@@ -16,9 +16,9 @@ from MAR.Prompts.reasoning import reasoning_prompt
 class Agent(Node):
     def __init__(self, id: str | None =None, domain: str = "", role:str = None , llm_name: str = "",reason_name: str = "",):
         super().__init__(id, reason_name, domain, llm_name)
-        self.llm = LLMRegistry.get(llm_name)
-        self.role = RoleRegistry(domain, role)
-        self.reason = reason_name
+        self.llm = LLMRegistry.get(llm_name)#基座模型
+        self.role = RoleRegistry(domain, role)#角色
+        self.reason = reason_name#推理方法
 
         self.message_aggregation = self.role.get_message_aggregation()
         self.description = self.role.get_description()
@@ -31,6 +31,8 @@ class Agent(Node):
             self.post_output_format = self.output_format
             self.post_description = "\nReflect on possible errors in the answer above and answer again using the same format. If you think there are no errors in your previous answers that will affect the results, there is no need to correct them.\n"
     
+    # 处理输入数据，构建系统提示和用户提示，整合空间信息（其他代理的输出）和时间信息（上一轮对话）
+    # 空间信息和时间信息通过参数传入函数
     def _process_inputs(self, raw_inputs:Dict[str,str], spatial_info:Dict[str, Dict], temporal_info:Dict[str, Dict], **kwargs):
         query = raw_inputs['query']
         spatial_prompt = message_aggregation(raw_inputs, spatial_info, self.message_aggregation)
@@ -45,6 +47,9 @@ class Agent(Node):
         user_prompt += f"\n\nIn the last round of dialogue, other agents' outputs were:\n\n{temporal_prompt}" if temporal_prompt else ""
         return [{'role':'system','content':system_prompt},{'role':'user','content':user_prompt}]
 
+    # 执行代理的推理过程
+    # 输入：输入数据、空间信息、时间信息
+    # 输出：推理结果
     def _execute(self, input:Dict[str,str],  spatial_info:Dict[str,Dict], temporal_info:Dict[str,Dict],**kwargs):
         """
         Run the agent.
@@ -140,6 +145,11 @@ class Agent(Node):
 
 @AgentRegistry.register('FinalRefer')
 class FinalRefer(Node):
+    """
+    用于最终决策的节点
+    整合所有代理的输出
+    生成最终答案
+    """
     def __init__(self, id: str | None =None, agent_name = "", domain = "", llm_name = "", prompt_file = ""):
         super().__init__(id, agent_name, domain, llm_name)
         self.llm = LLMRegistry.get(llm_name)

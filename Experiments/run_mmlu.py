@@ -24,7 +24,7 @@ from MAR.Utils.utils import fix_random_seed
 from MAR.Utils.globals import Cost, PromptTokens, CompletionTokens
 from MAR.Utils.log import configure_logging
 from Datasets.mmlu_dataset import MMLUDataset
-from Datasets.MMLU.download import download
+# from Datasets.MMLU.download import download
 from Datasets.math_dataset import MATH_get_predict
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -45,7 +45,7 @@ def load_config(config_path):
     with open(config_path, 'r',encoding='utf-8') as file:
         return yaml.safe_load(file)
     
-def parse_args():
+def parse_args():#把运行参数转为args
     parser = argparse.ArgumentParser(description="MAR Experiments on MMLU")
     parser.add_argument("--result_file", type=str, default=None)
     parser.add_argument('--lr', type=float, default=0.01,help="learning rate")
@@ -54,7 +54,7 @@ def parse_args():
     parser.add_argument('--num_rounds',type=int,default=1,help="Number of optimization/inference rounds for one query")
     parser.add_argument('--domain', type=str, default="mmlu",help="Domain (the same as dataset name), default 'mmlu'")
     parser.add_argument('--decision_method', type=str, default='FinalRefer',
-                        help='The decison method of the agentprune')
+                        help='The decison method of the agentprune')#剪枝的方法
     parser.add_argument('--prompt_file', type=str, default='MAR/Roles/FinalNode/mmlu.json')
     parser.add_argument('--start_epoch', type=int, default=0)
     parser.add_argument('--cost_rate', type=float, default=500.0)
@@ -79,46 +79,64 @@ if __name__ == '__main__':
     total_solved, total_executed = (0, 0)
     
     # download()
-    dataset_train = MMLUDataset('dev')
+    dataset_train = MMLUDataset('train')
     dataset_test = MMLUDataset('test')
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # 初始化路由器，设置最大代理数量并移动到指定设备
     router = MasRouter(max_agent=args.max_agent, device=device).to(device)
+    # 创建Adam优化器，用于优化路由器参数，学习率为args.lr
     optimizer = torch.optim.Adam(router.parameters(), lr=args.lr)
+    # 加载任务配置文件
     tasks = tasks_profile
+    # 加载LLM配置文件
     llms = llm_profile
+    # 加载推理配置文件
     reasonings = reasoning_profile
     logger.info("Start training...")
     
-    train_batch = min(40,len(dataset_train)//args.batch_size)
+    # 计算训练批次数量，最多40个批次
+    # train_batch = min(40,len(dataset_train)//args.batch_size)
+    train_batch = min(0,len(dataset_train)//args.batch_size)#不训练
     for i_epoch in range(args.epochs):
         if i_epoch < args.start_epoch:
+            # 如果当前epoch小于起始epoch，加载之前保存的模型权重
             router.load_state_dict(torch.load(f"mmlu_router_epoch{i_epoch}.pth", map_location=device))
             continue
         for i_batch in range(train_batch):
             print(f"Batch {i_batch}",80*'-')
             start_ts = time.time()
+            # 加载当前批次的数据，转换为任务和答案的格式
             current_batch = dataloader(dataset_train, args.batch_size, i_batch)
             current_batch = [{"task":dataset_train.record_to_input(record)["task"], "answer":dataset_train.record_to_target_answer(record)} for row, record in current_batch.iterrows()]
             
             queries = [item['task'] for item in current_batch]
             answers = [item['answer'] for item in current_batch]
             task_labels = [1 for _ in current_batch]
+            # 将任务标签转换为张量并移到指定设备
             tasks_y = torch.tensor(task_labels).to(device)
             optimizer.zero_grad()
+            # 前向传播，获取结果、成本、对数概率、损失等
             results, costs, log_probs, tasks_probs, vae_loss, agents_num  = router.forward(queries, tasks, llms, reasonings, task_labels, prompt_file=args.prompt_file)
             task_loss = F.cross_entropy(tasks_probs, tasks_y)
+            # 初始化列表，用于存储每个样本的实用值、答案损失和是否解决的标志
             utilities = []
             answers_loss = []
             is_solved_list = []
+            # 遍历当前批次的数据，计算每个样本的实用值、答案损失和解决标志
             for query, result, answer, log_prob, cost in zip(queries, results, answers, log_probs, costs):
                 predict_answer = MATH_get_predict(result)[0]
                 is_solved = str(predict_answer).strip()==str(answer).strip()
+                # 更新解决和执行的计数
                 total_solved = total_solved + is_solved
                 total_executed = total_executed + 1
+                # 计算实用值，将成本乘以成本率并从解决标志中减去
                 utility = is_solved - cost * args.cost_rate
+                # 将实用值添加到列表中
                 utilities.append(utility)
+                # 将解决标志添加到列表中
                 is_solved_list.append(is_solved)
+                # 计算答案损失，将对数概率乘以实用值
                 answer_loss = -log_prob * utility
                 answers_loss.append(answer_loss)
                 logger.debug(f"Raw Result: {result}")
@@ -126,11 +144,14 @@ if __name__ == '__main__':
                 logger.debug(f"Truth: {answer}")
                 logger.debug(f"Cost: {cost}")
                 logger.debug(f"is_solved: {is_solved}")
+            # 计算答案损失，将所有样本的答案损失求和并除以样本数量
             answer_loss = torch.stack(answers_loss).sum() / len(answers_loss)
+            # 计算VAE损失，取平均值
             vae_loss = vae_loss.mean()
             is_solved_tensor = torch.tensor(is_solved_list, dtype=torch.float32, device=device).unsqueeze(1)  # shape: [N, 1]
             # adjust_loss = ((1 - is_solved_tensor) * (router.num_determiner.max_agent - agents_num) + 0.25 * is_solved_tensor *  agents_num).mean()
             loss = task_loss + answer_loss + vae_loss*0.001 # + adjust_loss
+            # 根据这个批次的结果，执行反向传播和优化
             loss.backward()
             optimizer.step()
             
@@ -143,11 +164,13 @@ if __name__ == '__main__':
 
     logger.info("Finish training...")
     logger.info("Start testing...")
+    # 开始测试阶段
     total_solved, total_executed = (0, 0)
-    test_batch = min(80, len(dataset_test)//args.batch_size)
+    # test_batch = min(80, len(dataset_test)//args.batch_size)
+    test_batch = min(1, len(dataset_test)//args.batch_size)
     for i_batch in range(test_batch):
         if i_batch < train_batch:
-            continue
+            continue  # 跳过已训练的批次
         print(f"Batch {i_batch}",80*'-')
         start_ts = time.time()
         current_batch = dataloader(dataset_test, args.batch_size, i_batch)

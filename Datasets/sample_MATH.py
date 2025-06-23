@@ -1,3 +1,7 @@
+"""
+每个level会抽取10%的文件，并保存到sampled_test文件夹中
+保持原有的category分类结构
+"""
 import os
 import json
 import random
